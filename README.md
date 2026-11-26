@@ -173,6 +173,84 @@ Para remover o cluster sem afetar o volume PostgreSQL:
 k3d cluster delete task-manager
 ```
 
+## Nomad local
+
+Etapa 5 usa Nomad `2.1.1` no Linux amd64. Baixe o binário e a lista de checksums da [fonte oficial](https://releases.hashicorp.com/nomad/2.1.1/) e valide o checksum antes de instalar em `~/.local/bin`:
+
+```bash
+set -euo pipefail
+mkdir -p "$HOME/.local/bin"
+tmpdir=$(mktemp -d)
+trap 'rm -f "$tmpdir/nomad_2.1.1_linux_amd64.zip" "$tmpdir/nomad_2.1.1_SHA256SUMS" "$tmpdir/nomad"; rmdir "$tmpdir" 2>/dev/null || true' EXIT
+curl -fsSLo "$tmpdir/nomad_2.1.1_linux_amd64.zip" \
+  https://releases.hashicorp.com/nomad/2.1.1/nomad_2.1.1_linux_amd64.zip
+curl -fsSLo "$tmpdir/nomad_2.1.1_SHA256SUMS" \
+  https://releases.hashicorp.com/nomad/2.1.1/nomad_2.1.1_SHA256SUMS
+(cd "$tmpdir" && grep -F 'nomad_2.1.1_linux_amd64.zip' nomad_2.1.1_SHA256SUMS | sha256sum --check -)
+python3 - "$tmpdir/nomad_2.1.1_linux_amd64.zip" "$tmpdir" <<'PY'
+import sys
+import zipfile
+
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    archive.extract("nomad", sys.argv[2])
+PY
+install -m 0755 "$tmpdir/nomad" "$HOME/.local/bin/nomad"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Nos terminais adicionais usados para deploy, adicione o diretório do Nomad ao `PATH`:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Inicie um agente temporário single-node em modo desenvolvimento. No Linux, execute o cliente Nomad como root para que suporte cgroups; o agente e sua API/UI ficam limitados a loopback. Este modo não usa ACLs e não é apropriado para produção:
+
+```bash
+sudo -A "$HOME/.local/bin/nomad" agent -dev -bind=127.0.0.1
+```
+
+Em outro terminal, crie `nomad/local.auto.hcl` localmente com a URL do PostgreSQL no gateway Docker. O arquivo é ignorado pelo Git; restrinja suas permissões e não o versione. URL-encode caracteres reservados na senha:
+
+```hcl
+database_url = "postgresql+psycopg://<usuario>:<senha>@172.17.0.1:5433/task_manager"
+```
+
+```bash
+chmod 600 nomad/local.auto.hcl
+```
+
+O GHCR está público, então não é necessária credencial de pull. O valor da URL é enviado ao agente local junto com a especificação do job; modo dev não oferece armazenamento de segredos protegido por ACL. Use somente para este ambiente local.
+
+Valide e execute primeiro o Job batch de migração, depois o serviço da API:
+
+```bash
+nomad job validate -var-file=nomad/local.auto.hcl nomad/task-manager-migration.nomad
+nomad job run -var-file=nomad/local.auto.hcl nomad/task-manager-migration.nomad
+nomad job status task-manager-migration
+
+nomad job validate -var-file=nomad/local.auto.hcl nomad/task-manager-api.nomad
+nomad job run -var-file=nomad/local.auto.hcl nomad/task-manager-api.nomad
+nomad job status task-manager-api
+```
+
+Consulte a alocação para encontrar a porta dinâmica, que deve estar vinculada somente a `127.0.0.1`:
+
+```bash
+nomad job allocs task-manager-api
+nomad alloc status <allocation-id>
+curl http://127.0.0.1:<porta>/health
+curl http://127.0.0.1:<porta>/tasks
+```
+
+O service check HTTP consulta `/health`; falhas temporárias do banco marcam o serviço como não saudável sem reiniciar o processo. Uma falha do processo é tratada pela política de restart do job.
+
+Para encerrar, pare o job da API e interrompa o agente dev com `Ctrl+C` no terminal em que foi iniciado. Isso encerra o ambiente Nomad temporário, mas preserva o volume PostgreSQL do Compose:
+
+```bash
+nomad job stop task-manager-api
+```
+
 ## Endpoints
 
 | Método | Endpoint | Comportamento |
@@ -195,5 +273,7 @@ Cada tarefa possui `id`, `title`, `description`, `completed` e `created_at`. O t
 - `app/`: configuração, conexão, modelos, schemas, serviços e rotas.
 - `migrations/`: configuração e revisões Alembic.
 - `tests/`: testes de health check e CRUD com PostgreSQL.
+- `kubernetes/`: configuração do K3d e manifests Kubernetes.
+- `nomad/`: Jobs HCL de migração e API; variáveis locais não são versionadas.
 
-Deploys Nomad e configuração do self-hosted runner pertencem às etapas seguintes. Os orquestradores usam a mesma imagem da API; o PostgreSQL permanece independente deles.
+Configuração do self-hosted runner e CI/CD integrado pertencem à etapa seguinte. Kubernetes e Nomad usam a mesma imagem da API; o PostgreSQL permanece independente deles.

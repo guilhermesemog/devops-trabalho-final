@@ -9,3 +9,4 @@ htmlcov/
 .env
 .env.*
 !.env.example
+/nomad/local.auto.hcl
