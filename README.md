@@ -133,9 +133,9 @@ Antes de habilitar o deploy, deixe o cluster K3d ativo e configure o Nomad persi
 
 O cluster local executa a imagem publicada no GHCR e reutiliza o PostgreSQL do Compose. Os valores de imagem versionados servem como referência para uso manual; o workflow substitui a imagem pelo SHA completo da execução atual. O pacote está público, então não é necessário criar `imagePullSecret`.
 
-Instale K3d `v5.9.0` e kubectl `v1.35.5`, e confirme que os comandos `k3d` e `kubectl` estão no `PATH`. O arquivo `kubernetes/k3d-config.yaml` cria um cluster de nó único na porta API `6443` e configura o alias `postgres.k3d.internal`.
+Instale K3d `v5.9.0` e kubectl `v1.35.5`, e confirme que os comandos `k3d` e `kubectl` estão no `PATH`. O arquivo `kubernetes/k3d-config.yaml` cria um cluster de nó único na porta API `6443`. Os manifests dos Pods configuram `postgres.k3d.internal` para o gateway da bridge Docker (`172.17.0.1`), pois os aliases de hosts dos nós K3d não são herdados pelos Pods.
 
-O banco continua publicado em loopback e, adicionalmente, no gateway da bridge Docker, por padrão `172.17.0.1`. Se o gateway da sua bridge for diferente, defina `DOCKER_BRIDGE_GATEWAY` em `.env` e ajuste o IP correspondente em `kubernetes/k3d-config.yaml`. Configure `.env` conforme a seção do Compose e inicie apenas o banco:
+O banco continua publicado em loopback e, adicionalmente, no gateway da bridge Docker, por padrão `172.17.0.1`. Se o gateway da sua bridge for diferente, defina `DOCKER_BRIDGE_GATEWAY` em `.env` e ajuste o IP nos campos `hostAliases` de `kubernetes/migration-job.yaml` e `kubernetes/deployment.yaml`. Configure `.env` conforme a seção do Compose e inicie apenas o banco:
 
 ```bash
 docker compose up -d db

@@ -9,7 +9,3 @@ kubeAPI:
   host: "127.0.0.1"
   hostIP: "127.0.0.1"
   hostPort: "6443"
-hostAliases:
-  - ip: "172.17.0.1"
-    hostnames:
-      - "postgres.k3d.internal"

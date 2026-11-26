@@ -13,6 +13,10 @@ spec:
       labels:
         app: task-manager-api
     spec:
+      hostAliases:
+        - ip: "172.17.0.1"
+          hostnames:
+            - "postgres.k3d.internal"
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
