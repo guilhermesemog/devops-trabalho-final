@@ -45,7 +45,7 @@ O Compose inicia a API e o PostgreSQL. O banco usa um volume nomeado persistente
 cp .env.example .env
 ```
 
-As portas publicadas por padrão são `5433` para PostgreSQL e `8000` para a API, limitadas a `127.0.0.1`. Se alguma estiver ocupada, defina `POSTGRES_PORT` ou `API_PORT` em `.env` para uma porta livre.
+As portas publicadas por padrão são `5433` para PostgreSQL e `8000` para a API. A API fica limitada a `127.0.0.1`; o PostgreSQL também é publicado no gateway Docker para acesso do K3d, conforme a seção abaixo. Se alguma porta estiver ocupada, defina `POSTGRES_PORT` ou `API_PORT` em `.env` para uma porta livre.
 
 Construa a imagem e inicie o banco:
 
@@ -114,7 +114,64 @@ O workflow `.github/workflows/ci-cd.yml` executa em runners hospedados pelo GitH
 - Pull requests direcionados à `main` executam os testes com PostgreSQL 17 e não publicam imagens.
 - Pushes para `main` executam os testes e, somente após aprovação, constroem a imagem com o Dockerfile do projeto e a publicam no GitHub Container Registry.
 
-A imagem é identificada pelo SHA completo do commit, por exemplo `ghcr.io/guilhermesemog/devops-trabalho-final:<sha>`. O workflow usa `GITHUB_TOKEN` com permissões mínimas de leitura do repositório e publicação de pacotes; não requer PAT nem segredos de registry configurados manualmente. O pacote deve permanecer privado no GHCR.
+A imagem é identificada pelo SHA completo do commit, por exemplo `ghcr.io/guilhermesemog/devops-trabalho-final:<sha>`. O workflow usa `GITHUB_TOKEN` com permissões mínimas de leitura do repositório e publicação de pacotes; não requer PAT nem segredos de registry configurados manualmente. Atualmente o pacote GHCR está público, portanto o pull da imagem não requer autenticação.
+
+## Kubernetes local com K3d
+
+O cluster local executa a imagem publicada no GHCR e reutiliza o PostgreSQL do Compose. A imagem usada pelos manifests está fixada no SHA completo `47500425f393c2679f6282cac8be30e8ce953ef5`. O pacote está público, então não é necessário criar `imagePullSecret`.
+
+Instale K3d `v5.9.0` e kubectl `v1.35.5`, e confirme que os comandos `k3d` e `kubectl` estão no `PATH`. O arquivo `kubernetes/k3d-config.yaml` cria um cluster de nó único na porta API `6443` e configura o alias `postgres.k3d.internal`.
+
+O banco continua publicado em loopback e, adicionalmente, no gateway da bridge Docker, por padrão `172.17.0.1`. Se o gateway da sua bridge for diferente, defina `DOCKER_BRIDGE_GATEWAY` em `.env` e ajuste o IP correspondente em `kubernetes/k3d-config.yaml`. Configure `.env` conforme a seção do Compose e inicie apenas o banco:
+
+```bash
+docker compose up -d db
+k3d cluster create --config kubernetes/k3d-config.yaml
+kubectl apply -f kubernetes/namespace.yaml
+```
+
+Crie localmente o arquivo ignorado `.env.k8s` com apenas a URL de conexão que os Pods usarão (não a URL interna `db:5432` do Compose):
+
+```text
+DATABASE_URL=postgresql+psycopg://<usuario>:<senha>@postgres.k3d.internal:<POSTGRES_PORT>/task_manager
+```
+
+URL-encode caracteres reservados nos campos de usuário e senha.
+Restrinja as permissões do arquivo e crie o Secret diretamente no cluster. Não versione `.env.k8s` nem um Secret renderizado:
+
+```bash
+chmod 600 .env.k8s
+kubectl create secret generic task-manager-db \
+  --namespace task-manager \
+  --from-env-file=.env.k8s
+```
+
+Execute as migrações explicitamente antes de iniciar a API:
+
+```bash
+kubectl apply -f kubernetes/migration-job.yaml
+kubectl wait --for=condition=complete job/task-manager-migration \
+  --namespace task-manager --timeout=180s
+kubectl logs job/task-manager-migration --namespace task-manager
+kubectl apply -f kubernetes/deployment.yaml
+kubectl apply -f kubernetes/service.yaml
+kubectl wait --for=condition=available deployment/task-manager-api \
+  --namespace task-manager --timeout=180s
+```
+
+Em outro terminal, encaminhe a porta local `8080` (ou uma porta livre) ao Service `ClusterIP`:
+
+```bash
+kubectl port-forward --namespace task-manager service/task-manager-api 8080:8000
+curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:8080/tasks
+```
+
+Para remover o cluster sem afetar o volume PostgreSQL:
+
+```bash
+k3d cluster delete task-manager
+```
 
 ## Endpoints
 
@@ -139,4 +196,4 @@ Cada tarefa possui `id`, `title`, `description`, `completed` e `created_at`. O t
 - `migrations/`: configuração e revisões Alembic.
 - `tests/`: testes de health check e CRUD com PostgreSQL.
 
-Deploys Kubernetes/Nomad e configuração do self-hosted runner pertencem à Etapa 6. Esses orquestradores usarão a mesma imagem da API; o PostgreSQL permanece independente deles.
+Deploys Nomad e configuração do self-hosted runner pertencem às etapas seguintes. Os orquestradores usam a mesma imagem da API; o PostgreSQL permanece independente deles.
