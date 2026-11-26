@@ -1,6 +1,6 @@
 # Task Manager API
 
-API REST para criar, listar, consultar, atualizar e excluir tarefas. O projeto usa FastAPI, SQLAlchemy 2, PostgreSQL, Alembic e Pytest. Esta entrega cobre as Etapas 1 e 2: backend funcional e execução containerizada local.
+API REST para criar, listar, consultar, atualizar e excluir tarefas. O projeto usa FastAPI, SQLAlchemy 2, PostgreSQL, Alembic e Pytest. As Etapas 1–3 cobrem o backend, a execução containerizada local e CI com publicação de imagens.
 
 ## Requisitos
 
@@ -107,6 +107,15 @@ export TEST_DATABASE_URL='postgresql+psycopg://task_manager:<senha-do-.env>@127.
 
 Substitua o placeholder pela senha local e ajuste a porta caso `POSTGRES_PORT` tenha sido alterada. Não use o banco de produção da aplicação como banco de testes.
 
+## CI e publicação no GHCR
+
+O workflow `.github/workflows/ci-cd.yml` executa em runners hospedados pelo GitHub:
+
+- Pull requests direcionados à `main` executam os testes com PostgreSQL 17 e não publicam imagens.
+- Pushes para `main` executam os testes e, somente após aprovação, constroem a imagem com o Dockerfile do projeto e a publicam no GitHub Container Registry.
+
+A imagem é identificada pelo SHA completo do commit, por exemplo `ghcr.io/guilhermesemog/devops-trabalho-final:<sha>`. O workflow usa `GITHUB_TOKEN` com permissões mínimas de leitura do repositório e publicação de pacotes; não requer PAT nem segredos de registry configurados manualmente. O pacote deve permanecer privado no GHCR.
+
 ## Endpoints
 
 | Método | Endpoint | Comportamento |
@@ -130,4 +139,4 @@ Cada tarefa possui `id`, `title`, `description`, `completed` e `created_at`. O t
 - `migrations/`: configuração e revisões Alembic.
 - `tests/`: testes de health check e CRUD com PostgreSQL.
 
-CI/CD, publicação no GHCR, Kubernetes e Nomad pertencem às etapas posteriores do projeto. Esses orquestradores usarão a imagem da API; o PostgreSQL permanece independente deles.
+Deploys Kubernetes/Nomad e configuração do self-hosted runner pertencem à Etapa 6. Esses orquestradores usarão a mesma imagem da API; o PostgreSQL permanece independente deles.
