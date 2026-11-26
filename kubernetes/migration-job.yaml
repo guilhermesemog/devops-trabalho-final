@@ -10,6 +10,10 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      hostAliases:
+        - ip: "172.17.0.1"
+          hostnames:
+            - "postgres.k3d.internal"
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
