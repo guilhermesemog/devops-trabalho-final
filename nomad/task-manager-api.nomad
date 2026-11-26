@@ -2,12 +2,24 @@ variable "database_url" {
   type = string
 }
 
+variable "image" {
+  type = string
+}
+
 job "task-manager-api" {
   datacenters = ["dc1"]
   type        = "service"
 
   group "api" {
     count = 1
+
+    update {
+      max_parallel      = 1
+      min_healthy_time  = "10s"
+      healthy_deadline  = "3m"
+      progress_deadline = "5m"
+      auto_revert       = true
+    }
 
     network {
       port "http" {
@@ -27,7 +39,7 @@ job "task-manager-api" {
       shutdown_delay = "5s"
 
       config {
-        image      = "ghcr.io/guilhermesemog/devops-trabalho-final:47500425f393c2679f6282cac8be30e8ce953ef5"
+        image      = var.image
         force_pull = true
         ports      = ["http"]
         healthchecks {

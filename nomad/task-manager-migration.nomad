@@ -2,6 +2,10 @@ variable "database_url" {
   type = string
 }
 
+variable "image" {
+  type = string
+}
+
 job "task-manager-migration" {
   datacenters = ["dc1"]
   type        = "batch"
@@ -16,7 +20,7 @@ job "task-manager-migration" {
       driver = "docker"
 
       config {
-        image      = "ghcr.io/guilhermesemog/devops-trabalho-final:47500425f393c2679f6282cac8be30e8ce953ef5"
+        image      = var.image
         force_pull = true
         command    = "alembic"
         args       = ["upgrade", "head"]

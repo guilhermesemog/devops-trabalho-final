@@ -1,6 +1,6 @@
 # Task Manager API
 
-API REST para criar, listar, consultar, atualizar e excluir tarefas. O projeto usa FastAPI, SQLAlchemy 2, PostgreSQL, Alembic e Pytest. As Etapas 1–3 cobrem o backend, a execução containerizada local e CI com publicação de imagens.
+API REST para criar, listar, consultar, atualizar e excluir tarefas. O projeto usa FastAPI, SQLAlchemy 2, PostgreSQL, Alembic e Pytest. As Etapas 1–6 cobrem o backend, a execução containerizada, CI/CD e deploy local no Kubernetes e Nomad.
 
 ## Requisitos
 
@@ -107,18 +107,31 @@ export TEST_DATABASE_URL='postgresql+psycopg://task_manager:<senha-do-.env>@127.
 
 Substitua o placeholder pela senha local e ajuste a porta caso `POSTGRES_PORT` tenha sido alterada. Não use o banco de produção da aplicação como banco de testes.
 
-## CI e publicação no GHCR
+## CI/CD e publicação no GHCR
 
-O workflow `.github/workflows/ci-cd.yml` executa em runners hospedados pelo GitHub:
+O workflow `.github/workflows/ci-cd.yml` executa testes e build em runners hospedados pelo GitHub. Pull requests direcionados à `main` executam os testes com PostgreSQL 17 e não publicam imagens nem usam recursos locais. Um push para `main` executa testes, publica a imagem no GHCR e, após sucesso, aciona automaticamente uma migração e os deploys no K3d e no Nomad.
 
-- Pull requests direcionados à `main` executam os testes com PostgreSQL 17 e não publicam imagens.
-- Pushes para `main` executam os testes e, somente após aprovação, constroem a imagem com o Dockerfile do projeto e a publicam no GitHub Container Registry.
+A imagem é identificada pelo SHA completo do commit, por exemplo `ghcr.io/guilhermesemog/devops-trabalho-final:<sha>`; não há uso de `latest`. Uma migração Kubernetes por execução precede os dois deploys. Os Jobs de deploy usam um runner self-hosted `deploy` dedicado a este repositório. Eles só podem executar para push em `main`; nunca configure o runner local para jobs de pull request. O runner precisa executar como o mesmo usuário que possui o kubeconfig K3d e os arquivos locais do Nomad. O workflow usa Nomad para workloads e não invoca o socket Docker diretamente.
 
-A imagem é identificada pelo SHA completo do commit, por exemplo `ghcr.io/guilhermesemog/devops-trabalho-final:<sha>`. O workflow usa `GITHUB_TOKEN` com permissões mínimas de leitura do repositório e publicação de pacotes; não requer PAT nem segredos de registry configurados manualmente. Atualmente o pacote GHCR está público, portanto o pull da imagem não requer autenticação.
+Configure o runner em **Settings → Actions → Runners** no repositório e use o label adicional `deploy`, além dos labels padrão Linux/x64. Baixe-o conforme as instruções mostradas pelo GitHub para Linux x64 e extraia-o fora do checkout. Para evitar colocar o token de registro no histórico do shell, leia-o interativamente:
+
+```bash
+read -rs -p 'Runner registration token: ' RUNNER_TOKEN
+printf '\n'
+./config.sh --url https://github.com/guilhermesemog/devops-trabalho-final \
+  --token "$RUNNER_TOKEN" --labels deploy
+unset RUNNER_TOKEN
+sudo -A ./svc.sh install "$USER"
+sudo -A ./svc.sh start
+```
+
+O token é temporário: obtenha-o diretamente no GitHub no momento da configuração e não o cole em chats, workflow, logs ou arquivos versionados. Instale o runner como serviço para que fique disponível aos workflows.
+
+Antes de habilitar o deploy, deixe o cluster K3d ativo e configure o Nomad persistente conforme a seção abaixo. O runner usa `~/.config/nomad/task-manager.auto.hcl` e `~/.config/nomad/ci-deploy.token`; ambos devem pertencer ao usuário do runner, ficar fora do checkout e ter permissões restritas. Não são necessários GitHub Actions secrets para essas credenciais. O pacote GHCR está público e não requer credencial de pull.
 
 ## Kubernetes local com K3d
 
-O cluster local executa a imagem publicada no GHCR e reutiliza o PostgreSQL do Compose. A imagem usada pelos manifests está fixada no SHA completo `47500425f393c2679f6282cac8be30e8ce953ef5`. O pacote está público, então não é necessário criar `imagePullSecret`.
+O cluster local executa a imagem publicada no GHCR e reutiliza o PostgreSQL do Compose. Os valores de imagem versionados servem como referência para uso manual; o workflow substitui a imagem pelo SHA completo da execução atual. O pacote está público, então não é necessário criar `imagePullSecret`.
 
 Instale K3d `v5.9.0` e kubectl `v1.35.5`, e confirme que os comandos `k3d` e `kubectl` estão no `PATH`. O arquivo `kubernetes/k3d-config.yaml` cria um cluster de nó único na porta API `6443` e configura o alias `postgres.k3d.internal`.
 
@@ -146,14 +159,20 @@ kubectl create secret generic task-manager-db \
   --from-env-file=.env.k8s
 ```
 
-Execute as migrações explicitamente antes de iniciar a API:
+Para executar manualmente uma migração, use uma referência de imagem publicada e um nome exclusivo para o Job. O workflow gera o nome com o ID da execução e remove automaticamente Jobs concluídos após 24 horas:
 
 ```bash
-kubectl apply -f kubernetes/migration-job.yaml
-kubectl wait --for=condition=complete job/task-manager-migration \
-  --namespace task-manager --timeout=180s
-kubectl logs job/task-manager-migration --namespace task-manager
-kubectl apply -f kubernetes/deployment.yaml
+IMAGE_REF='ghcr.io/guilhermesemog/devops-trabalho-final:<sha>'
+MIGRATION_JOB="task-manager-migration-manual-$(date +%s)-$$"
+sed -E \
+  -e "s|name: task-manager-migration$|name: ${MIGRATION_JOB}|" \
+  -e "s|image: ghcr.io/guilhermesemog/devops-trabalho-final:[^[:space:]]+|image: ${IMAGE_REF}|" \
+  kubernetes/migration-job.yaml | kubectl apply -f -
+kubectl wait --for=condition=complete "job/${MIGRATION_JOB}" \
+    --namespace task-manager --timeout=330s
+sed -E \
+  "s|image: ghcr.io/guilhermesemog/devops-trabalho-final:[^[:space:]]+|image: ${IMAGE_REF}|" \
+  kubernetes/deployment.yaml | kubectl apply -f -
 kubectl apply -f kubernetes/service.yaml
 kubectl wait --for=condition=available deployment/task-manager-api \
   --namespace task-manager --timeout=180s
@@ -225,12 +244,13 @@ O GHCR está público, então não é necessária credencial de pull. O valor da
 Valide e execute primeiro o Job batch de migração, depois o serviço da API:
 
 ```bash
-nomad job validate -var-file=nomad/local.auto.hcl nomad/task-manager-migration.nomad
-nomad job run -var-file=nomad/local.auto.hcl nomad/task-manager-migration.nomad
+IMAGE_REF='ghcr.io/guilhermesemog/devops-trabalho-final:47500425f393c2679f6282cac8be30e8ce953ef5'
+nomad job validate -var-file=nomad/local.auto.hcl -var="image=${IMAGE_REF}" nomad/task-manager-migration.nomad
+nomad job run -var-file=nomad/local.auto.hcl -var="image=${IMAGE_REF}" nomad/task-manager-migration.nomad
 nomad job status task-manager-migration
 
-nomad job validate -var-file=nomad/local.auto.hcl nomad/task-manager-api.nomad
-nomad job run -var-file=nomad/local.auto.hcl nomad/task-manager-api.nomad
+nomad job validate -var-file=nomad/local.auto.hcl -var="image=${IMAGE_REF}" nomad/task-manager-api.nomad
+nomad job run -var-file=nomad/local.auto.hcl -var="image=${IMAGE_REF}" nomad/task-manager-api.nomad
 nomad job status task-manager-api
 ```
 
@@ -250,6 +270,57 @@ Para encerrar, pare o job da API e interrompa o agente dev com `Ctrl+C` no termi
 ```bash
 nomad job stop task-manager-api
 ```
+
+## Nomad persistente para CI/CD
+
+O workflow integrado usa um agente single-node persistente, diferente do modo `-dev` temporário da etapa anterior. O serviço de sistema executa como root para que o Docker driver funcione; RPC, Serf e HTTP/UI ficam limitados a loopback. O cliente Nomad usa a interface `lo`, então as portas dinâmicas da API também ficam publicadas somente em `127.0.0.1`. ACLs protegem a API e o runner recebe um token de cliente associado somente ao Job `task-manager-api`.
+
+Instale o binário já validado na etapa anterior, a configuração e a unidade systemd:
+
+```bash
+sudo -A install -o root -g root -m 0755 "$HOME/.local/bin/nomad" /usr/local/bin/nomad
+sudo -A install -d -o root -g root -m 0755 /etc/nomad.d
+sudo -A install -o root -g root -m 0644 nomad/agent.hcl /etc/nomad.d/agent.hcl
+sudo -A install -o root -g root -m 0644 nomad/nomad.service /etc/systemd/system/nomad.service
+sudo -A systemctl daemon-reload
+sudo -A systemctl enable --now nomad
+```
+
+Crie o arquivo de variáveis que o runner passará ao Job Nomad. Use a URL do banco acessível pelo container Nomad (gateway Docker e porta publicada), não a URL interna `db:5432` do Compose. Restrinja o acesso ao usuário do runner:
+
+```bash
+mkdir -p "$HOME/.config/nomad"
+chmod 700 "$HOME/.config/nomad"
+```
+
+Crie `~/.config/nomad/task-manager.auto.hcl` sem adicionar o arquivo ao repositório:
+
+```hcl
+database_url = "postgresql+psycopg://<usuario>:<senha>@172.17.0.1:5433/task_manager"
+```
+
+URL-encode caracteres reservados na URL e aplique `chmod 600 "$HOME/.config/nomad/task-manager.auto.hcl"`.
+
+Inicialize ACLs uma única vez. O token de bootstrap é salvo em arquivo somente root; não o imprima nem o copie para o usuário do runner:
+
+```bash
+sudo -A install -d -o root -g root -m 0700 /root/.config/nomad
+sudo -A sh -c 'umask 077; /usr/local/bin/nomad acl bootstrap > /root/.config/nomad/bootstrap.txt'
+```
+
+Use o token de bootstrap para aplicar a política limitada ao Job da API e criar o token do runner. O JSON com o token gerado fica temporariamente sob `/root`; o comando de extração grava apenas o `SecretID` no arquivo local do runner sem exibi-lo no terminal:
+
+```bash
+sudo -A sh -c 'set -eu; umask 077; export NOMAD_TOKEN="$(sed -n "s/^Secret ID[[:space:]]*=[[:space:]]*//p" /root/.config/nomad/bootstrap.txt)"; /usr/local/bin/nomad acl policy apply -namespace=default -job=task-manager-api task-manager-api-ci "$1"; /usr/local/bin/nomad acl token create -name=task-manager-ci -policy=task-manager-api-ci -json > /root/.config/nomad/ci-token.json' sh "$PWD/nomad/ci-deploy-policy.hcl"
+sudo -A python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["SecretID"])' /root/.config/nomad/ci-token.json > "$HOME/.config/nomad/ci-deploy.token"
+sudo -A rm -f /root/.config/nomad/ci-token.json
+sudo -A chown "$USER:$(id -gn)" "$HOME/.config/nomad/ci-deploy.token"
+chmod 600 "$HOME/.config/nomad/ci-deploy.token"
+```
+
+Execute o comando de política a partir da raiz do repositório e substitua `<usuario>` e `<senha>` pela conexão do Compose. Se o ACL bootstrap já foi executado, não o execute novamente; mantenha o token de gestão root-only para futuras operações administrativas. O token `ci-deploy.token` é usado pelo workflow, não é um GitHub Actions secret.
+
+Configure o runner self-hosted em **Settings → Actions → Runners** do repositório. Selecione Linux x64, adicione o label `deploy` e instale-o como serviço do mesmo usuário dono de `~/.kube/config` e `~/.config/nomad`. O token de registro disponibilizado pelo GitHub é temporário; use-o diretamente no host e não o armazene no repositório. Confirme que o cluster K3d e o serviço Nomad estão ativos antes de habilitar o fluxo.
 
 ## Endpoints
 
@@ -274,6 +345,6 @@ Cada tarefa possui `id`, `title`, `description`, `completed` e `created_at`. O t
 - `migrations/`: configuração e revisões Alembic.
 - `tests/`: testes de health check e CRUD com PostgreSQL.
 - `kubernetes/`: configuração do K3d e manifests Kubernetes.
-- `nomad/`: Jobs HCL de migração e API; variáveis locais não são versionadas.
+- `nomad/`: Jobs HCL, configuração systemd e política ACL; segredos e variáveis locais não são versionados.
 
-Configuração do self-hosted runner e CI/CD integrado pertencem à etapa seguinte. Kubernetes e Nomad usam a mesma imagem da API; o PostgreSQL permanece independente deles.
+Kubernetes e Nomad usam a mesma imagem da API; o PostgreSQL permanece independente deles.

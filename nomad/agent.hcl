@@ -1,0 +1,33 @@
+data_dir  = "/var/lib/nomad"
+bind_addr = "127.0.0.1"
+
+addresses {
+  http = "127.0.0.1"
+  rpc  = "127.0.0.1"
+  serf = "127.0.0.1"
+}
+
+advertise {
+  http = "127.0.0.1"
+  rpc  = "127.0.0.1"
+  serf = "127.0.0.1"
+}
+
+server {
+  enabled          = true
+  bootstrap_expect = 1
+}
+
+client {
+  enabled           = true
+  servers           = ["127.0.0.1"]
+  network_interface = "lo"
+}
+
+acl {
+  enabled = true
+}
+
+ui {
+  enabled = true
+}
